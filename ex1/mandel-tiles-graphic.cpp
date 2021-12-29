@@ -47,6 +47,34 @@ int input_params( fractal_param_t* p )
 
 }
 
+void* func2(void* rank){
+	long myRank = (long) rank;
+	printf("Ola da Thread %ld\n", myRank);
+	//Verifica se está liberado buscar na fila
+	//Tira um fractal da fila
+	//Se fila de fractais .size < (numThreads-1)
+	//acorda a thread 0
+
+	//enquanto fractal não é o EOW
+	//marcar inicio tempo
+	//chama fractal
+	//marca final tempo
+	//preencher o array de tempo das threads
+	//consegue um fractal para trabalhar com
+
+}
+
+void* func1(void* rank){
+	printf("Ola da Thread 0\n");
+	//enquanto não chegou no final do arquivo 
+	//declarar um fractal
+	//se fila de fractais .size > 4*(numThreads-1)
+	//	vai dormir, esperando ser acordada
+	//inclui na fila, o fractal
+
+	//coloca EOW *(numThreads-1) na fila
+}
+
 /**
  * @brief Function to calculate mandelbrot set
  * 
@@ -103,6 +131,8 @@ int main ( int argc, char* argv[] )
 		numThreads = atoi(argv[2]);
 	}
 
+	printf("Num Threads: %d\n", numThreads);
+
 	if ((input=fopen(argv[1],"r"))==NULL) {
 		perror("fdopen");
 		exit(-1);
@@ -114,10 +144,21 @@ int main ( int argc, char* argv[] )
 		count++;
 	}
 
-	pthread_t* threadsArray;
-	threadsArray = new pthread_t[numThreads];
+	pthread_t threadsArray[numThreads];
 
-	delete[] threadsArray;
+	for(long threadRank = 0; threadRank<numThreads; threadRank ++){
+		if(threadRank == 0){
+			pthread_create(&threadsArray[threadRank], NULL, func1, (void*) threadRank);
+		}else{
+			pthread_create(&threadsArray[threadRank], NULL, func2, (void*) threadRank);
+		}
+	}
+
+	for(long threadRank = 0; threadRank<numThreads; threadRank ++){
+		pthread_join(threadsArray[threadRank], NULL);
+	}
+
+
 	return 0;
 }
 
