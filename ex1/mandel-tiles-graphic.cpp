@@ -8,9 +8,12 @@
 #define MAXITER 32768
 
 FILE* input; // descriptor for the list of tiles (cannot be stdin)
-int   color_pick = 5; // decide how to choose the color palette
-
-// params for each call to the fractal function
+int  numThreads = 4; //default number of threads are to be used 
+ 
+/**
+ * @brief Params for each call to the fractal function
+ * 
+ */
 typedef struct {
 	int left; int low;  // lower left corner in the screen
 	int ires; int jres; // resolution in pixels of the area to compute
@@ -18,6 +21,12 @@ typedef struct {
 	double xmax; double ymax;   // upper right corner in domain (x,y)
 } fractal_param_t;
 
+/**
+ * @brief Reads a line from the input and sets all attributes of p
+ * 
+ * @param p out
+ * @return int 
+ */
 int input_params( fractal_param_t* p )
 { 
 	int n;
@@ -38,11 +47,15 @@ int input_params( fractal_param_t* p )
 
 }
 
-// Function to draw mandelbrot set
+/**
+ * @brief Function to calculate mandelbrot set
+ * 
+ * @param p 
+ */
 void fractal( fractal_param_t* p )
 {
 	double dx, dy;
-	int i, j, k, color;
+	int i, j, k;
 	double x, y, u, v, u2, v2;
 
 	dx = ( p->xmax - p->xmin ) / p->ires;
@@ -66,22 +79,11 @@ void fractal( fractal_param_t* p )
 			// greater than 2 exit the loop
 			for (k=0; (k < MAXITER) && ((u2+v2) < 4); ++k) {
 				// Calculate Mandelbrot function
-				// z = z*z + c where z is a complex number
 
-				// imag = 2*z_real*z_imaginary + c_imaginary
 				v = 2 * u * v + y;
-				// real = z_real^2 - z_imaginary^2 + c_real
 				u  = u2 - v2 + x;
 				u2 = u * u;
 				v2 = v * v;
-			}
-			if (k==MAXITER) {
-				// converging areas are black
-				color = 0;
-			} else {
-				// graphics mode has only 16 colors;
-				// choose a range and recycle!
-				color = ( k >> color_pick ) %16;
 			}
 		}
 	}
@@ -90,23 +92,23 @@ void fractal( fractal_param_t* p )
 
 int main ( int argc, char* argv[] )
 {
-	int i,j,k;
 	fractal_param_t p;
 
 	if ((argc!=2)&&(argc!=3)) {
-		fprintf(stderr,"usage %s filename [color_pick]\n", argv[0] );
+		fprintf(stderr,"usage %s filename [numThreads]\n", argv[0] );
 		exit(-1);
 	} 
 	if (argc==3) {
-		color_pick = atoi(argv[2]);
-	} 
+		numThreads = atoi(argv[2]);
+	}
+
 	if ((input=fopen(argv[1],"r"))==NULL) {
 		perror("fdopen");
 		exit(-1);
 	}
 
 	while (input_params(&p)!=EOF) {
-		fractal(&p); // No exercicio a funcao nao vai exibir nada! :-(
+		fractal(&p);
 	}
 
 	return 0;
