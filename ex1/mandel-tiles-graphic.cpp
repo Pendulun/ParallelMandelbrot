@@ -98,6 +98,7 @@ int main ( int argc, char* argv[] )
 		fprintf(stderr,"usage %s filename [numThreads]\n", argv[0] );
 		exit(-1);
 	} 
+
 	if (argc==3) {
 		numThreads = atoi(argv[2]);
 	}
@@ -107,10 +108,16 @@ int main ( int argc, char* argv[] )
 		exit(-1);
 	}
 
+	int count = 0;
 	while (input_params(&p)!=EOF) {
 		fractal(&p);
+		count++;
 	}
 
+	pthread_t* threadsArray;
+	threadsArray = new pthread_t[numThreads];
+
+	delete[] threadsArray;
 	return 0;
 }
 
