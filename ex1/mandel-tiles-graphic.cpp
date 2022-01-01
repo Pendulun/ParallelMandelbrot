@@ -8,9 +8,6 @@
 #define MAXY 480
 #define MAXITER 32768
 
-FILE* input; // descriptor for the list of tiles (cannot be stdin)
-int  numWorkersThreads = 4; //default number of threads are to be used 
-
 /**
  * @brief Params for each call to the fractal function
  * 
@@ -22,17 +19,27 @@ typedef struct {
 	double xmax; double ymax;   // upper right corner in domain (x,y)
 } fractal_param_t;
 
+//Queue where all worker threads will access
 std::queue<fractal_param_t> fractalQueue;
 
+//Indicates if the queue is empty
 pthread_cond_t empty_queue;
-pthread_cond_t filled_queue;
-
-pthread_mutex_t workers_queue_access;
 pthread_mutex_t empty_queue_mutex;
+
+//Indicates if the queue was filled by the file reading thread
+pthread_cond_t filled_queue;
 pthread_mutex_t filled_queue_mutex;
 
-bool startedEOWs = false;
+//A mutex to the fractal queue for worker processes
+pthread_mutex_t workers_queue_access;
 
+FILE* input; // descriptor for the list of tiles (cannot be stdin)
+
+int  numWorkersThreads = 4; //default number of threads are to be used 
+unsigned int minSizeFractalQueue = 0; //It must be equal to the numWorkersThreads
+
+//Flag that indicates if an EOW fractal has been read by some worker Thread
+bool startedEOWs = false;
 
 /**
  * @brief Reads a line from the input and sets all attributes of p
@@ -120,41 +127,54 @@ bool checkForEOW(fractal_param_t &newFractal){
 	return isEOW;
 }
 
+/**
+ * @brief Worker thread main function for consuming the fractal queue until it gets a EOW fractal
+ * 
+ * @param rank 
+ * @return void* 
+ */
 void* readFromFractalQueueAndCalculate(void* rank){
 	long myRank = (long) rank;
 	printf("Ola da Thread %ld\n", myRank);
 
+	//Indicates if this thread popped an EOW fractal from the fractal queue
 	bool eowFlag = false;
-	unsigned int minSizeFractalQueue = numWorkersThreads;
 
-	//Gets fractals while it doesnt get a EOW fractal
+	//Gets fractals while it doesnt get an EOW fractal
 	while(!eowFlag){
 
 		//Only one worker thread will get pass here
         pthread_mutex_lock(&workers_queue_access);
         
-		//Check fractals queue size
+		//Check fractals queue minimum size
 		checkForFractalsInQueue(minSizeFractalQueue, myRank)
         
-        //fractal(&p);
+		//Gets a new fractal from the queue
 		fractal_param_t newFractal = fractalQueue.front();
 		fractalQueue.pop();
 		printf("Trabalhadora %ld consumiu a fila!\n", myRank);
 
+		//Checks if the fractal is an EOW fractal
 		bool fractalIsEOW = checkForEOW(newFractal);
 		if(fractalIsEOW){
 			//This thread should not do anything more
+
+			//Indicates to other threads that the EOW fractals have begun appearing in the queue
 			startedEOWs = true;
+			
 			printf("Trabalhadora %ld viu que eh um EOW!\n", myRank);
+
 			//Free access to other threads
 			pthread_mutex_unlock(&workers_queue_access);
+
+			//Dont do anything more
 			break;
 		}
 
 		//Checks again after consuming a fractal
 		checkForFractalsInQueue(minSizeFractalQueue, myRank)
 
-		//Free access to other threads
+		//Free access to the fractal queue to other worker threads
         pthread_mutex_unlock(&workers_queue_access);
 
 		//If it got here, the fractal should be computed
@@ -244,6 +264,8 @@ int main ( int argc, char* argv[] )
 	if (argc==3) {
 		numWorkersThreads = atoi(argv[2]);
 	}
+
+	minSizeFractalQueue = numWorkersThreads;
 
 	printf("Num Threads: %d\n", numWorkersThreads);
 
