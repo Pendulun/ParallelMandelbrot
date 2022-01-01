@@ -109,19 +109,37 @@ void fractal( fractal_param_t* p )
 	}
 }
 
+/**
+ * @brief Checks if the fractals queue has the minimum amount of fractals
+ * 
+ * @param minSizeFractalQueue 
+ * @param myRank 
+ */
 void checkForFractalsInQueue(const unsigned int minSizeFractalQueue, const unsigned int myRank){
+	//If startedEOWs, than we shouldn't care if the queue has less then the minimum amount of fractals
 	if(fractalQueue.size() < minSizeFractalQueue && !startedEOWs){
+		//Signal the file reader thread that it should fill the queue
 		pthread_cond_signal(&empty_queue);
 		printf("Trabalhadora %ld sinalizou leitora!\n", myRank);
-
-		//Only this thread will be waiting as it got the lock above
+		
+		//Waits for the file reader thread to signal that it filled the queue
+		//Only this thread will be waiting as it got the queue lock
 		while(pthread_cond_wait(&filled_queue, &filled_queue_mutex) != 0){
 			printf("Trabalhadora %ld esta esperando!\n", myRank);
 		}
+
+		//Free to access the queue
 		printf("Trabalhadora %ld viu que foi preenchida!\n", myRank);
 	}
 }
 
+/**
+ * @brief Checks if the fractal represents an EOW fractal
+ * 
+ * @param newFractal 
+ * @return true 
+ * @return false 
+ */
 bool checkForEOW(fractal_param_t &newFractal){
 	bool isEOW = newFractal.xmin == 0.0 && newFractal.xmax == 0.0 && newFractal.ymin == 0.0 && newFractal.ymax == 0.0;
 	return isEOW;
@@ -184,6 +202,11 @@ void* readFromFractalQueueAndCalculate(void* rank){
 
 }
 
+/**
+ * @brief Turns the fractal into an EOW fractal
+ * 
+ * @param myFractal 
+ */
 void eowFractal(fractal_param_t& myFractal){
 	myFractal.left = 0;
 	myFractal.low = 0;
@@ -195,13 +218,19 @@ void eowFractal(fractal_param_t& myFractal){
 	myFractal.ymax = 0.0;
 }
 
+/**
+ * @brief Main function of the thread that reads the input files and put fractal on the fractals queue
+ * 
+ * @param rank 
+ * @return void* 
+ */
 void* populateFractalQueue(void* rank){
 	printf("Ola da Thread 0\n");
 
 	unsigned int maxNumFractalsOnQueue = 4*(numWorkersThreads);
 	bool gotToEndOfFile = false;
 
-	while(true){
+	while(!gotToEndOfFile){
 
 		//Wait signal to fill queue
         pthread_mutex_lock(&empty_queue_mutex);
@@ -215,16 +244,15 @@ void* populateFractalQueue(void* rank){
 		printf("Leitora preenchendo %d fractais!\n", maxQtFractalToBeInserted);
 		int fractalInsertedCount = 0;
 		while(fractalInsertedCount < maxQtFractalToBeInserted && !gotToEndOfFile){
-
+			//Creates and fill newFractal and know if reached end of file
 			fractal_param_t newFractal;
-			//Fill newFractal and know if reached end of file
 			gotToEndOfFile = input_params(newFractal) == EOF;
 
-			//Add the EOW fractals in the queue. May pass the max number of fractals in the queue
 			if(gotToEndOfFile){
+				//Add the EOW fractals in the queue. May pass the max number of fractals in the queue.
+				//It's for a greater good
 
 				printf("Leitora chegou no fim do arquivo. Adicionando EOWS!\n");
-
 				for(int eowNumber = 0; eowNumber < numWorkersThreads; eowNumber++){
 					fractal_param_t newEowFractal;
 					eowFractal(newEowFractal);
@@ -241,15 +269,11 @@ void* populateFractalQueue(void* rank){
 
 		//Already did everything it should
         pthread_mutex_unlock(&empty_queue_mutex);
+
+		//Signal the only worker thread waiting that the queue has been filled
         pthread_cond_signal(&filled_queue);
 
 		printf("Leitora avisou que preencheu!\n");
-
-		//Already added EOW's and should not do anything more
-		if(gotToEndOfFile){
-			break;
-		}
-        
     }
 	
 }
