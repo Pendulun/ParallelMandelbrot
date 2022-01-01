@@ -2,14 +2,15 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <queue>
 
 #define MAXX 640
 #define MAXY 480
 #define MAXITER 32768
 
 FILE* input; // descriptor for the list of tiles (cannot be stdin)
-int  numThreads = 4; //default number of threads are to be used 
- 
+int  numWorkersThreads = 4; //default number of threads are to be used 
+
 /**
  * @brief Params for each call to the fractal function
  * 
@@ -21,16 +22,28 @@ typedef struct {
 	double xmax; double ymax;   // upper right corner in domain (x,y)
 } fractal_param_t;
 
+std::queue<fractal_param_t> fractalQueue;
+
+pthread_cond_t empty_queue;
+pthread_cond_t filled_queue;
+
+pthread_mutex_t workers_queue_access;
+pthread_mutex_t empty_queue_mutex;
+pthread_mutex_t filled_queue_mutex;
+
+bool startedEOWs = false;
+
+
 /**
  * @brief Reads a line from the input and sets all attributes of p
  * 
  * @param p out
  * @return int 
  */
-int input_params( fractal_param_t* p )
+int input_params(fractal_param_t& newFractal)
 { 
 	int n;
-	n = fscanf(input,"%d %d %d %d",&(p->left),&(p->low),&(p->ires),&(p->jres));
+	n = fscanf(input,"%d %d %d %d",&(newFractal.left),&(newFractal.low),&(newFractal.ires),&(newFractal.jres));
 	if (n == EOF) return n;
 
 	if (n!=4) {
@@ -38,41 +51,13 @@ int input_params( fractal_param_t* p )
 		exit(-1);
 	}
 	n = fscanf(input,"%lf %lf %lf %lf",
-		 &(p->xmin),&(p->ymin),&(p->xmax),&(p->ymax));
+		 &(newFractal.xmin),&(newFractal.ymin),&(newFractal.xmax),&(newFractal.ymax));
 	if (n!=4) {
 		perror("scanf(xmin,ymin,xmax,ymax)");
 		exit(-1);
 	}
 	return 8;
 
-}
-
-void* func2(void* rank){
-	long myRank = (long) rank;
-	printf("Ola da Thread %ld\n", myRank);
-	//Verifica se está liberado buscar na fila
-	//Tira um fractal da fila
-	//Se fila de fractais .size < (numThreads-1)
-	//acorda a thread 0
-
-	//enquanto fractal não é o EOW
-	//marcar inicio tempo
-	//chama fractal
-	//marca final tempo
-	//preencher o array de tempo das threads
-	//consegue um fractal para trabalhar com
-
-}
-
-void* func1(void* rank){
-	printf("Ola da Thread 0\n");
-	//enquanto não chegou no final do arquivo 
-	//declarar um fractal
-	//se fila de fractais .size > 4*(numThreads-1)
-	//	vai dormir, esperando ser acordada
-	//inclui na fila, o fractal
-
-	//coloca EOW *(numThreads-1) na fila
 }
 
 /**
@@ -117,47 +102,181 @@ void fractal( fractal_param_t* p )
 	}
 }
 
+void checkForFractalsInQueue(const unsigned int minSizeFractalQueue, const unsigned int myRank){
+	if(fractalQueue.size() < minSizeFractalQueue && !startedEOWs){
+		pthread_cond_signal(&empty_queue);
+		printf("Trabalhadora %ld sinalizou leitora!\n", myRank);
+
+		//Only this thread will be waiting as it got the lock above
+		while(pthread_cond_wait(&filled_queue, &filled_queue_mutex) != 0){
+			printf("Trabalhadora %ld esta esperando!\n", myRank);
+		}
+		printf("Trabalhadora %ld viu que foi preenchida!\n", myRank);
+	}
+}
+
+bool checkForEOW(fractal_param_t &newFractal){
+	bool isEOW = newFractal.xmin == 0.0 && newFractal.xmax == 0.0 && newFractal.ymin == 0.0 && newFractal.ymax == 0.0;
+	return isEOW;
+}
+
+void* readFromFractalQueueAndCalculate(void* rank){
+	long myRank = (long) rank;
+	printf("Ola da Thread %ld\n", myRank);
+
+	bool eowFlag = false;
+	unsigned int minSizeFractalQueue = numWorkersThreads;
+
+	//Gets fractals while it doesnt get a EOW fractal
+	while(!eowFlag){
+
+		//Only one worker thread will get pass here
+        pthread_mutex_lock(&workers_queue_access);
+        
+		//Check fractals queue size
+		checkForFractalsInQueue(minSizeFractalQueue, myRank)
+        
+        //fractal(&p);
+		fractal_param_t newFractal = fractalQueue.front();
+		fractalQueue.pop();
+		printf("Trabalhadora %ld consumiu a fila!\n", myRank);
+
+		bool fractalIsEOW = checkForEOW(newFractal);
+		if(fractalIsEOW){
+			//This thread should not do anything more
+			startedEOWs = true;
+			printf("Trabalhadora %ld viu que eh um EOW!\n", myRank);
+			//Free access to other threads
+			pthread_mutex_unlock(&workers_queue_access);
+			break;
+		}
+
+		//Checks again after consuming a fractal
+		checkForFractalsInQueue(minSizeFractalQueue, myRank)
+
+		//Free access to other threads
+        pthread_mutex_unlock(&workers_queue_access);
+
+		//If it got here, the fractal should be computed
+		fractal(&newFractal);
+		
+    }
+
+}
+
+void eowFractal(fractal_param_t& myFractal){
+	myFractal.left = 0;
+	myFractal.low = 0;
+	myFractal.ires = 0;
+	myFractal.jres = 0;
+	myFractal.xmin = 0.0;
+	myFractal.xmax = 0.0;
+	myFractal.ymin = 0.0;
+	myFractal.ymax = 0.0;
+}
+
+void* populateFractalQueue(void* rank){
+	printf("Ola da Thread 0\n");
+
+	unsigned int maxNumFractalsOnQueue = 4*(numWorkersThreads);
+	bool gotToEndOfFile = false;
+
+	while(true){
+
+		//Wait signal to fill queue
+        pthread_mutex_lock(&empty_queue_mutex);
+		printf("Leitora esta esperando!\n");
+        while(pthread_cond_wait(&empty_queue, &empty_queue_mutex) != 0);
+		printf("Leitora foi ativada!\n");
+
+		//Insert fractals on queue
+		int maxQtFractalToBeInserted =  maxNumFractalsOnQueue - fractalQueue.size();
+
+		printf("Leitora preenchendo %d fractais!\n", maxQtFractalToBeInserted);
+		int fractalInsertedCount = 0;
+		while(fractalInsertedCount < maxQtFractalToBeInserted && !gotToEndOfFile){
+
+			fractal_param_t newFractal;
+			//Fill newFractal and know if reached end of file
+			gotToEndOfFile = input_params(newFractal) == EOF;
+
+			//Add the EOW fractals in the queue. May pass the max number of fractals in the queue
+			if(gotToEndOfFile){
+
+				printf("Leitora chegou no fim do arquivo. Adicionando EOWS!\n");
+
+				for(int eowNumber = 0; eowNumber < numWorkersThreads; eowNumber++){
+					fractal_param_t newEowFractal;
+					eowFractal(newEowFractal);
+					fractalQueue.push(newEowFractal);
+					printf("Adicionou EOW!\n");
+				}
+
+			}else{ // Just push the newFractal on queue
+				fractalQueue.push(newFractal);
+				fractalInsertedCount++;
+			}
+
+		}
+
+		//Already did everything it should
+        pthread_mutex_unlock(&empty_queue_mutex);
+        pthread_cond_signal(&filled_queue);
+
+		printf("Leitora avisou que preencheu!\n");
+
+		//Already added EOW's and should not do anything more
+		if(gotToEndOfFile){
+			break;
+		}
+        
+    }
+	
+}
 
 int main ( int argc, char* argv[] )
 {
-	fractal_param_t p;
-
 	if ((argc!=2)&&(argc!=3)) {
-		fprintf(stderr,"usage %s filename [numThreads]\n", argv[0] );
+		fprintf(stderr,"usage %s filename [numWorkersThreads]\n", argv[0] );
 		exit(-1);
 	} 
 
 	if (argc==3) {
-		numThreads = atoi(argv[2]);
+		numWorkersThreads = atoi(argv[2]);
 	}
 
-	printf("Num Threads: %d\n", numThreads);
+	printf("Num Threads: %d\n", numWorkersThreads);
 
 	if ((input=fopen(argv[1],"r"))==NULL) {
 		perror("fdopen");
 		exit(-1);
 	}
 
-	int count = 0;
-	while (input_params(&p)!=EOF) {
-		fractal(&p);
-		count++;
-	}
+	pthread_t threadsArray[numWorkersThreads+1];
 
-	pthread_t threadsArray[numThreads];
+	pthread_mutex_init(&empty_queue_mutex, NULL);
+    pthread_mutex_init(&filled_queue_mutex, NULL);
+    pthread_mutex_init(&workers_queue_access, NULL);
+	pthread_cond_init(&empty_queue, NULL);
+    pthread_cond_init(&filled_queue, NULL);
 
-	for(long threadRank = 0; threadRank<numThreads; threadRank ++){
+	for(long threadRank = 0; threadRank<numWorkersThreads; threadRank ++){
 		if(threadRank == 0){
-			pthread_create(&threadsArray[threadRank], NULL, func1, (void*) threadRank);
+			pthread_create(&threadsArray[threadRank], NULL, populateFractalQueue, (void*) threadRank);
 		}else{
-			pthread_create(&threadsArray[threadRank], NULL, func2, (void*) threadRank);
+			pthread_create(&threadsArray[threadRank], NULL, readFromFractalQueueAndCalculate, (void*) threadRank);
 		}
 	}
 
-	for(long threadRank = 0; threadRank<numThreads; threadRank ++){
+	for(long threadRank = 0; threadRank < numWorkersThreads; threadRank ++){
 		pthread_join(threadsArray[threadRank], NULL);
 	}
 
+	pthread_mutex_destroy(&empty_queue_mutex);
+    pthread_mutex_destroy(&filled_queue_mutex);
+    pthread_mutex_destroy(&workers_queue_access);
+    pthread_cond_destroy(&empty_queue);
+    pthread_cond_destroy(&filled_queue);
 
 	return 0;
 }
