@@ -3,6 +3,11 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <queue>
+#include <vector>
+#include <list>
+#include <chrono>
+#include <iterator>
+#include <math.h>
 
 #define MAXX 640
 #define MAXY 480
@@ -19,8 +24,19 @@ typedef struct {
 	double xmax; double ymax;   // upper right corner in domain (x,y)
 } fractal_param_t;
 
+//Statistics struct
+typedef struct{
+	unsigned int totalFractalsComputed;
+	unsigned int emptyQueueCount;
+	float totalTimeComputed;
+	std::list<std::chrono::duration<double, std::milli>> execTimesPerFractalComputed;
+} thread_exec_stats;
+
 //Queue where all worker threads will access
 std::queue<fractal_param_t> fractalQueue;
+
+//Vector that contains statistics for every worker thread
+std::vector<thread_exec_stats> executionStats;
 
 //Indicates if the queue is empty
 pthread_cond_t empty_queue;
@@ -118,19 +134,23 @@ void fractal( fractal_param_t* p )
 void checkForFractalsInQueue(const unsigned int minSizeFractalQueue, const unsigned int myRank){
 	//If startedEOWs, than we shouldn't care if the queue has less then the minimum amount of fractals
 	if(fractalQueue.size() < minSizeFractalQueue && !startedEOWs){
+
+		//For statistics purposes
+		if(fractalQueue.empty()){
+			executionStats.at(myRank).emptyQueueCount += 1;
+		}
 		//Signal the file reader thread that it should fill the queue
 		pthread_cond_signal(&empty_queue);
-		printf("Trabalhadora %ld sinalizou leitora!\n", myRank);
 		
 		//Waits for the file reader thread to signal that it filled the queue
 		//Only this thread will be waiting as it got the queue lock
 		while(pthread_cond_wait(&filled_queue, &filled_queue_mutex) != 0){
-			printf("Trabalhadora %ld esta esperando!\n", myRank);
+			//Just waits
 		}
 
-		//Free to access the queue
-		printf("Trabalhadora %ld viu que foi preenchida!\n", myRank);
 	}
+
+	//Free to access the queue
 }
 
 /**
@@ -140,9 +160,21 @@ void checkForFractalsInQueue(const unsigned int minSizeFractalQueue, const unsig
  * @return true 
  * @return false 
  */
-bool checkForEOW(fractal_param_t &newFractal){
+bool isFractalEOW(fractal_param_t &newFractal){
 	bool isEOW = newFractal.xmin == 0.0 && newFractal.xmax == 0.0 && newFractal.ymin == 0.0 && newFractal.ymax == 0.0;
 	return isEOW;
+}
+
+/**
+ * @brief Sets the initial values for the thread's stats
+ * 
+ * @param threadRank 
+ */
+void clearThreadStats(unsigned int threadRank){
+	executionStats.at(threadRank).totalFractalsComputed = 0;
+	executionStats.at(threadRank).emptyQueueCount = 0;
+	executionStats.at(threadRank).execTimesPerFractalComputed.clear();
+	executionStats.at(threadRank).totalTimeComputed	= 0.0;
 }
 
 /**
@@ -151,53 +183,57 @@ bool checkForEOW(fractal_param_t &newFractal){
  * @param rank 
  * @return void* 
  */
-void* readFromFractalQueueAndCalculate(void* rank){
-	long myRank = (long) rank;
-	printf("Ola da Thread %ld\n", myRank);
+void* readFromFractalQueueAndCalculate(void* rankTotal){
+	long myRank = (long) rankTotal;
+	long workerRank = myRank - 1;
+
+	clearThreadStats((unsigned int) workerRank);
 
 	//Indicates if this thread popped an EOW fractal from the fractal queue
 	bool eowFlag = false;
 
-	//Gets fractals while it doesnt get an EOW fractal
+	//Gets fractals while it doesn't get an EOW fractal
 	while(!eowFlag){
 
 		//Only one worker thread will get pass here
         pthread_mutex_lock(&workers_queue_access);
         
-		//Check fractals queue minimum size
-		checkForFractalsInQueue(minSizeFractalQueue, myRank)
+		checkForFractalsInQueue(minSizeFractalQueue, workerRank);
         
 		//Gets a new fractal from the queue
 		fractal_param_t newFractal = fractalQueue.front();
 		fractalQueue.pop();
-		printf("Trabalhadora %ld consumiu a fila!\n", myRank);
 
-		//Checks if the fractal is an EOW fractal
-		bool fractalIsEOW = checkForEOW(newFractal);
-		if(fractalIsEOW){
-			//This thread should not do anything more
+		if(isFractalEOW(newFractal)){
 
 			//Indicates to other threads that the EOW fractals have begun appearing in the queue
 			startedEOWs = true;
-			
-			printf("Trabalhadora %ld viu que eh um EOW!\n", myRank);
 
 			//Free access to other threads
 			pthread_mutex_unlock(&workers_queue_access);
 
 			//Dont do anything more
+			eowFlag = true;
 			break;
 		}
 
 		//Checks again after consuming a fractal
-		checkForFractalsInQueue(minSizeFractalQueue, myRank)
+		checkForFractalsInQueue(minSizeFractalQueue, workerRank);
 
-		//Free access to the fractal queue to other worker threads
+		//Free the access to the fractal queue to other worker threads
         pthread_mutex_unlock(&workers_queue_access);
 
 		//If it got here, the fractal should be computed
+		auto initTime = std::chrono::high_resolution_clock::now();
 		fractal(&newFractal);
+		auto endTime = std::chrono::high_resolution_clock::now();
 		
+		//Collects statistics for this thread
+		//As each thread has its own thread_exec_stats, this is thread-safe
+		auto thisExecTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - initTime);
+		executionStats.at(workerRank).totalFractalsComputed += 1;
+		executionStats.at(workerRank).totalTimeComputed += thisExecTime.count();
+		executionStats.at(workerRank).execTimesPerFractalComputed.push_back(thisExecTime);
     }
 
 }
@@ -225,39 +261,37 @@ void eowFractal(fractal_param_t& myFractal){
  * @return void* 
  */
 void* populateFractalQueue(void* rank){
-	printf("Ola da Thread 0\n");
-
 	unsigned int maxNumFractalsOnQueue = 4*(numWorkersThreads);
 	bool gotToEndOfFile = false;
 
+	//Main file read and queue fill loop
 	while(!gotToEndOfFile){
 
 		//Wait signal to fill queue
         pthread_mutex_lock(&empty_queue_mutex);
-		printf("Leitora esta esperando!\n");
-        while(pthread_cond_wait(&empty_queue, &empty_queue_mutex) != 0);
-		printf("Leitora foi ativada!\n");
+        while(pthread_cond_wait(&empty_queue, &empty_queue_mutex) != 0){
+			//Just waits
+		}
+
+		//This thread has been awaken!
 
 		//Insert fractals on queue
 		int maxQtFractalToBeInserted =  maxNumFractalsOnQueue - fractalQueue.size();
-
-		printf("Leitora preenchendo %d fractais!\n", maxQtFractalToBeInserted);
 		int fractalInsertedCount = 0;
-		while(fractalInsertedCount < maxQtFractalToBeInserted && !gotToEndOfFile){
+		bool shouldReadFileAndPushQueue = fractalInsertedCount < maxQtFractalToBeInserted && !gotToEndOfFile;
+		while(shouldReadFileAndPushQueue){
 			//Creates and fill newFractal and know if reached end of file
 			fractal_param_t newFractal;
 			gotToEndOfFile = input_params(newFractal) == EOF;
 
 			if(gotToEndOfFile){
-				//Add the EOW fractals in the queue. May pass the max number of fractals in the queue.
-				//It's for a greater good
+				//Add the EOW fractals in the queue.
+				// May pass the max number of fractals in the queue. It's for a greater good
 
-				printf("Leitora chegou no fim do arquivo. Adicionando EOWS!\n");
 				for(int eowNumber = 0; eowNumber < numWorkersThreads; eowNumber++){
 					fractal_param_t newEowFractal;
 					eowFractal(newEowFractal);
 					fractalQueue.push(newEowFractal);
-					printf("Adicionou EOW!\n");
 				}
 
 			}else{ // Just push the newFractal on queue
@@ -265,6 +299,7 @@ void* populateFractalQueue(void* rank){
 				fractalInsertedCount++;
 			}
 
+			shouldReadFileAndPushQueue = fractalInsertedCount < maxQtFractalToBeInserted && !gotToEndOfFile;
 		}
 
 		//Already did everything it should
@@ -272,10 +307,63 @@ void* populateFractalQueue(void* rank){
 
 		//Signal the only worker thread waiting that the queue has been filled
         pthread_cond_signal(&filled_queue);
-
-		printf("Leitora avisou que preencheu!\n");
     }
+}
+
+/**
+ * @brief Computes and prints execution statistics
+ * 
+ */
+void computeAndPrintStatistics(){
+	//Get total Stats
+	unsigned int totalEmptyQueueCount = 0;
+	unsigned int totalFractalsComputed = 0;
+	double totalTimeExec = 0.0;
+
+	std::list<std::chrono::duration<double, std::milli>>::iterator execTimeIterator;
+	for(unsigned int statsIndex = 0; statsIndex < executionStats.size(); statsIndex ++){
+
+		thread_exec_stats threadStats = executionStats.at(statsIndex);
+		totalEmptyQueueCount += threadStats.emptyQueueCount;
+		totalFractalsComputed += threadStats.totalFractalsComputed;
+		totalTimeExec += threadStats.totalTimeComputed;
+	}
+
+	//Calculates Mean Stats
+	float meanFractalsComputed = 0.0;
+	double meanTimeComputingFractals = 0.0;
+
+	meanTimeComputingFractals = totalTimeExec/totalFractalsComputed;
+	meanFractalsComputed = totalFractalsComputed/numWorkersThreads;
+
+	//Computes Variation
+	float sumSquaredMeanErrorExecTime = 0.0;
+	float sumSquaredMeanErrorFractalsComputed = 0.0;
 	
+	for(unsigned int statsIndex = 0; statsIndex < executionStats.size(); statsIndex ++){
+		
+		thread_exec_stats threadStats = executionStats.at(statsIndex);
+		sumSquaredMeanErrorFractalsComputed += pow(meanFractalsComputed - threadStats.totalFractalsComputed, 2);
+
+		for(execTimeIterator = threadStats.execTimesPerFractalComputed.begin();
+								execTimeIterator != threadStats.execTimesPerFractalComputed.end();
+								execTimeIterator++){
+									double meanError = meanTimeComputingFractals-(*execTimeIterator).count();
+									sumSquaredMeanErrorExecTime += pow(meanError, 2);
+								
+								} 
+	}
+	float variationTimeComputingFractals = sumSquaredMeanErrorExecTime/(totalFractalsComputed-1);
+	float variationFractalsComputed = sumSquaredMeanErrorFractalsComputed/(totalFractalsComputed-1);
+
+	//Computes Standard Error
+	float standardDeviationTimeComputingFractals = pow(variationTimeComputingFractals, 0.5);
+	float standardDeviationFractalsComputed = pow(variationFractalsComputed, 0.5);
+
+	printf("Tarefas: total = %u; media por trabalhador = %f(%f)\n", totalFractalsComputed, meanFractalsComputed,
+																				 standardDeviationFractalsComputed);
+	printf("Tempo medio por tarefa: %.6f (%.6f) ms\n", meanTimeComputingFractals, standardDeviationTimeComputingFractals);
+	printf("Fila estava vazia: %u vezes\n", totalEmptyQueueCount);
 }
 
 int main ( int argc, char* argv[] )
@@ -289,9 +377,9 @@ int main ( int argc, char* argv[] )
 		numWorkersThreads = atoi(argv[2]);
 	}
 
+	//Resize the statistics vector to fit each worker thread
+	executionStats.resize(numWorkersThreads);
 	minSizeFractalQueue = numWorkersThreads;
-
-	printf("Num Threads: %d\n", numWorkersThreads);
 
 	if ((input=fopen(argv[1],"r"))==NULL) {
 		perror("fdopen");
@@ -306,7 +394,9 @@ int main ( int argc, char* argv[] )
 	pthread_cond_init(&empty_queue, NULL);
     pthread_cond_init(&filled_queue, NULL);
 
-	for(long threadRank = 0; threadRank<numWorkersThreads; threadRank ++){
+
+	//Starts each thread to corresponding function
+	for(long threadRank = 0; threadRank<numWorkersThreads+1; threadRank ++){
 		if(threadRank == 0){
 			pthread_create(&threadsArray[threadRank], NULL, populateFractalQueue, (void*) threadRank);
 		}else{
@@ -314,7 +404,8 @@ int main ( int argc, char* argv[] )
 		}
 	}
 
-	for(long threadRank = 0; threadRank < numWorkersThreads; threadRank ++){
+
+	for(long threadRank = 0; threadRank < numWorkersThreads+1; threadRank ++){
 		pthread_join(threadsArray[threadRank], NULL);
 	}
 
@@ -324,6 +415,7 @@ int main ( int argc, char* argv[] )
     pthread_cond_destroy(&empty_queue);
     pthread_cond_destroy(&filled_queue);
 
+	computeAndPrintStatistics();
+
 	return 0;
 }
-
