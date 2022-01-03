@@ -28,7 +28,7 @@ typedef struct {
 typedef struct{
 	unsigned int totalFractalsComputed;
 	unsigned int emptyQueueCount;
-	float totalTimeComputed;
+	double totalTimeComputed;
 	std::list<std::chrono::duration<double, std::milli>> execTimesPerFractalComputed;
 } thread_exec_stats;
 
@@ -230,11 +230,13 @@ void* readFromFractalQueueAndCalculate(void* rankTotal){
 		
 		//Collects statistics for this thread
 		//As each thread has its own thread_exec_stats, this is thread-safe
-		auto thisExecTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - initTime);
+		std::chrono::duration<double, std::milli> thisExecTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - initTime);
 		executionStats.at(workerRank).totalFractalsComputed += 1;
 		executionStats.at(workerRank).totalTimeComputed += thisExecTime.count();
 		executionStats.at(workerRank).execTimesPerFractalComputed.push_back(thisExecTime);
     }
+
+	return NULL;
 
 }
 
@@ -308,6 +310,8 @@ void* populateFractalQueue(void* rank){
 		//Signal the only worker thread waiting that the queue has been filled
         pthread_cond_signal(&filled_queue);
     }
+
+	return NULL;
 }
 
 /**
@@ -319,6 +323,7 @@ void computeAndPrintStatistics(){
 	unsigned int totalEmptyQueueCount = 0;
 	unsigned int totalFractalsComputed = 0;
 	double totalTimeExec = 0.0;
+	double maxExecTime = 0.0;
 
 	std::list<std::chrono::duration<double, std::milli>>::iterator execTimeIterator;
 	for(unsigned int statsIndex = 0; statsIndex < executionStats.size(); statsIndex ++){
@@ -327,6 +332,9 @@ void computeAndPrintStatistics(){
 		totalEmptyQueueCount += threadStats.emptyQueueCount;
 		totalFractalsComputed += threadStats.totalFractalsComputed;
 		totalTimeExec += threadStats.totalTimeComputed;
+		if(threadStats.totalTimeComputed > maxExecTime){
+			maxExecTime = threadStats.totalTimeComputed;
+		}
 	}
 
 	//Calculates Mean Stats
@@ -354,8 +362,10 @@ void computeAndPrintStatistics(){
 								} 
 	}
 	float variationTimeComputingFractals = sumSquaredMeanErrorExecTime/(totalFractalsComputed-1);
-	float variationFractalsComputed = sumSquaredMeanErrorFractalsComputed/(totalFractalsComputed-1);
-
+	float variationFractalsComputed = 0.0;
+	if(numWorkersThreads > 1){
+		variationFractalsComputed = sumSquaredMeanErrorFractalsComputed/(numWorkersThreads-1);
+	}
 	//Computes Standard Error
 	float standardDeviationTimeComputingFractals = pow(variationTimeComputingFractals, 0.5);
 	float standardDeviationFractalsComputed = pow(variationFractalsComputed, 0.5);
@@ -364,6 +374,7 @@ void computeAndPrintStatistics(){
 																				 standardDeviationFractalsComputed);
 	printf("Tempo medio por tarefa: %.6f (%.6f) ms\n", meanTimeComputingFractals, standardDeviationTimeComputingFractals);
 	printf("Fila estava vazia: %u vezes\n", totalEmptyQueueCount);
+	//printf("Max total exec time all threads: %.6f\n", maxExecTime);
 }
 
 int main ( int argc, char* argv[] )
@@ -377,6 +388,13 @@ int main ( int argc, char* argv[] )
 		numWorkersThreads = atoi(argv[2]);
 	}
 
+	pthread_mutex_init(&empty_queue_mutex, NULL);
+	pthread_mutex_init(&filled_queue_mutex, NULL);
+	pthread_mutex_init(&workers_queue_access, NULL);
+	pthread_cond_init(&empty_queue, NULL);
+	pthread_cond_init(&filled_queue, NULL);
+
+
 	//Resize the statistics vector to fit each worker thread
 	executionStats.resize(numWorkersThreads);
 	minSizeFractalQueue = numWorkersThreads;
@@ -387,13 +405,6 @@ int main ( int argc, char* argv[] )
 	}
 
 	pthread_t threadsArray[numWorkersThreads+1];
-
-	pthread_mutex_init(&empty_queue_mutex, NULL);
-    pthread_mutex_init(&filled_queue_mutex, NULL);
-    pthread_mutex_init(&workers_queue_access, NULL);
-	pthread_cond_init(&empty_queue, NULL);
-    pthread_cond_init(&filled_queue, NULL);
-
 
 	//Starts each thread to corresponding function
 	for(long threadRank = 0; threadRank<numWorkersThreads+1; threadRank ++){
@@ -409,13 +420,13 @@ int main ( int argc, char* argv[] )
 		pthread_join(threadsArray[threadRank], NULL);
 	}
 
+	computeAndPrintStatistics();
+
 	pthread_mutex_destroy(&empty_queue_mutex);
     pthread_mutex_destroy(&filled_queue_mutex);
     pthread_mutex_destroy(&workers_queue_access);
     pthread_cond_destroy(&empty_queue);
     pthread_cond_destroy(&filled_queue);
-
-	computeAndPrintStatistics();
 
 	return 0;
 }
